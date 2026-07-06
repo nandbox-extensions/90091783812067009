@@ -64,21 +64,19 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
         String userId = incomingMsg.getFrom().getId();
         String appId = incomingMsg.getAppId();
         Integer chatSettings = incomingMsg.getChatSettings();
-        String reference = Utils.getUniqueId();
 
         String text = incomingMsg.getText();
         if (text == null) {
             text = "";
         }
 
+        // Store every message (including commands) in DB (best-effort, async)
         storeMessage(incomingMsg, text);
 
         String trimmed = text.trim();
+
         if (trimmed.length() > 0 && (trimmed.charAt(0) == '/' || trimmed.charAt(0) == '!')) {
-            String cmdLine = trimmed;
-            while (cmdLine.indexOf("  ") >= 0) {
-                cmdLine = cmdLine.replace("  ", " ");
-            }
+            String cmdLine = normalizeSpaces(trimmed);
 
             if (startsWithCommand(cmdLine, "/get_all_messages") || startsWithCommand(cmdLine, "!get_all_messages")) {
                 requestAllMessages(chatId, userId, appId);
@@ -96,10 +94,11 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
             }
         }
 
+        // Default behavior: Echo back
         api.sendText(
                 chatId,
                 text,
-                reference,
+                Utils.getUniqueId(),
                 null,
                 userId,
                 new Integer(0),
@@ -124,62 +123,27 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
         }
 
         if (ref.startsWith("GETALL:")) {
-            handleGetAll(ref, extensionDocResponse);
+            Context ctx = parseGetAllRef(ref);
+            if (ctx == null) {
+                return;
+            }
+
+            JSONArray rows = extractRows(extensionDocResponse);
+            String out = formatMessages(rows, null);
+            sendText(ctx.chatId, out, ctx.toUserId, null, ctx.appId);
             return;
         }
 
         if (ref.startsWith("GETUSER:")) {
-            handleGetUser(ref, extensionDocResponse);
-        }
-    }
-
-    private void handleGetAll(String ref, ExtensionDocResponse extensionDocResponse) {
-        String payload = ref.substring("GETALL:".length());
-        int s1 = payload.indexOf(':');
-        int s2 = payload.indexOf(':', s1 + 1);
-        if (s1 < 0 || s2 < 0) {
-            return;
-        }
-        String chatId = payload.substring(0, s1);
-        String toUserId = payload.substring(s1 + 1, s2);
-        String appId = payload.substring(s2 + 1);
-
-        JSONArray rows = extractRows(extensionDocResponse);
-        String out = formatMessages(rows, null);
-        sendText(chatId, out, toUserId, null, appId);
-    }
-
-    private void handleGetUser(String ref, ExtensionDocResponse extensionDocResponse) {
-        String payload2 = ref.substring("GETUSER:".length());
-        int s1b = payload2.indexOf(':');
-        int s2b = payload2.indexOf(':', s1b + 1);
-        int s3b = payload2.indexOf(':', s2b + 1);
-        if (s1b < 0 || s2b < 0 || s3b < 0) {
-            return;
-        }
-        String chatId2 = payload2.substring(0, s1b);
-        String toUserId2 = payload2.substring(s1b + 1, s2b);
-        String appId2 = payload2.substring(s2b + 1, s3b);
-        String filterUserId = payload2.substring(s3b + 1);
-
-        JSONArray rows2 = extractRows(extensionDocResponse);
-        String out2 = formatMessages(rows2, filterUserId);
-        sendText(chatId2, out2, toUserId2, null, appId2);
-    }
-
-    private JSONArray extractRows(ExtensionDocResponse extensionDocResponse) {
-        JSONArray rows = null;
-        try {
-            JSONObject result = extensionDocResponse.getResult();
-            if (result != null) {
-                Object dataObj = result.get("data");
-                if (dataObj instanceof JSONArray) {
-                    rows = (JSONArray) dataObj;
-                }
+            Context2 ctx2 = parseGetUserRef(ref);
+            if (ctx2 == null) {
+                return;
             }
-        } catch (Exception e) {
+
+            JSONArray rows2 = extractRows(extensionDocResponse);
+            String out2 = formatMessages(rows2, ctx2.filterUserId);
+            sendText(ctx2.chatId, out2, ctx2.toUserId, null, ctx2.appId);
         }
-        return rows;
     }
 
     private void storeMessage(IncomingMessage incomingMsg, String text) {
@@ -206,6 +170,7 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
         obj.put("app_id", appId);
         obj.put("text", text);
 
+        // Best-effort timestamp if present in SDK
         try {
             Long ts = incomingMsg.getTimestamp();
             if (ts != null) {
@@ -223,6 +188,7 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
             return;
         }
         String ref = "GETALL:" + chatId + ":" + toUserId + ":" + appId + ":" + Utils.getUniqueId();
+        // Using DatabaseService.set(tableName, ref) to list all records (SDK behavior)
         DatabaseService.getInstance().set(api, TABLE_MESSAGES, ref);
     }
 
@@ -231,7 +197,23 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
             return;
         }
         String ref = "GETUSER:" + chatId + ":" + toUserId + ":" + appId + ":" + filterUserId + ":" + Utils.getUniqueId();
+        // Retrieve all, then filter client-side
         DatabaseService.getInstance().set(api, TABLE_MESSAGES, ref);
+    }
+
+    private JSONArray extractRows(ExtensionDocResponse extensionDocResponse) {
+        JSONArray rows = null;
+        try {
+            JSONObject result = extensionDocResponse.getResult();
+            if (result != null) {
+                Object dataObj = result.get("data");
+                if (dataObj instanceof JSONArray) {
+                    rows = (JSONArray) dataObj;
+                }
+            }
+        } catch (Exception e) {
+        }
+        return rows;
     }
 
     private String formatMessages(JSONArray rows, String filterUserId) {
@@ -251,14 +233,15 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
                 continue;
             }
             JSONObject row = (JSONObject) rowObj;
+
             String u = safeString(row.get("user_id"));
             if (filterUserId != null && (u == null || !filterUserId.equals(u))) {
                 continue;
             }
 
-            String text = safeString(row.get("text"));
-            if (text == null) {
-                text = "";
+            String t = safeString(row.get("text"));
+            if (t == null) {
+                t = "";
             }
 
             if (sb.length() > 0) {
@@ -266,7 +249,7 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
             }
             sb.append(u != null ? u : "unknown");
             sb.append(": ");
-            sb.append(text);
+            sb.append(t);
 
             count++;
             if (count >= MAX_RETURN_MESSAGES) {
@@ -334,12 +317,78 @@ public class ExtensionCustomLogic extends ExtensionAdapter {
         return rest.substring(0, nextSpace);
     }
 
+    private String normalizeSpaces(String s) {
+        if (s == null) {
+            return "";
+        }
+        String out = s;
+        while (out.indexOf("  ") >= 0) {
+            out = out.replace("  ", " ");
+        }
+        return out;
+    }
+
     private String safeString(Object o) {
         if (o == null) {
             return null;
         }
         try {
             return String.valueOf(o);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private static class Context {
+        String chatId;
+        String toUserId;
+        String appId;
+    }
+
+    private static class Context2 {
+        String chatId;
+        String toUserId;
+        String appId;
+        String filterUserId;
+    }
+
+    private Context parseGetAllRef(String ref) {
+        // ref: GETALL:<chatId>:<toUserId>:<appId>:<uniq>
+        try {
+            String payload = ref.substring("GETALL:".length());
+            int s1 = payload.indexOf(':');
+            int s2 = payload.indexOf(':', s1 + 1);
+            int s3 = payload.indexOf(':', s2 + 1);
+            if (s1 < 0 || s2 < 0 || s3 < 0) {
+                return null;
+            }
+            Context ctx = new Context();
+            ctx.chatId = payload.substring(0, s1);
+            ctx.toUserId = payload.substring(s1 + 1, s2);
+            ctx.appId = payload.substring(s2 + 1, s3);
+            return ctx;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    private Context2 parseGetUserRef(String ref) {
+        // ref: GETUSER:<chatId>:<toUserId>:<appId>:<filterUserId>:<uniq>
+        try {
+            String payload = ref.substring("GETUSER:".length());
+            int s1 = payload.indexOf(':');
+            int s2 = payload.indexOf(':', s1 + 1);
+            int s3 = payload.indexOf(':', s2 + 1);
+            int s4 = payload.indexOf(':', s3 + 1);
+            if (s1 < 0 || s2 < 0 || s3 < 0 || s4 < 0) {
+                return null;
+            }
+            Context2 ctx = new Context2();
+            ctx.chatId = payload.substring(0, s1);
+            ctx.toUserId = payload.substring(s1 + 1, s2);
+            ctx.appId = payload.substring(s2 + 1, s3);
+            ctx.filterUserId = payload.substring(s3 + 1, s4);
+            return ctx;
         } catch (Exception e) {
             return null;
         }
