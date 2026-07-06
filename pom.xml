@@ -14,5 +14,10 @@
       <artifactId>bots-api</artifactId>
       <version>1.5.7</version>
     </dependency>
+    <dependency>
+      <groupId>net.minidev</groupId>
+      <artifactId>json-smart</artifactId>
+      <version>2.6.0</version>
+    </dependency>
   </dependencies>
 </project>
